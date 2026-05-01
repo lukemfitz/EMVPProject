@@ -25,6 +25,8 @@ after decoding.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -35,13 +37,48 @@ from typing import List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 P: int = (1 << 61) - 1  # 61-bit Mersenne prime
+_P64 = np.int64(P)       # fits in int64; used for fast mod without object arrays
+
+# -- C extension (emvp_core.so) for fast F_p arithmetic ---------------------
+
+def _load_c_ext():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emvp_core.so")
+    if not os.path.exists(path):
+        return None
+    try:
+        lib = ctypes.CDLL(path)
+        _i64p = ctypes.POINTER(ctypes.c_int64)
+        lib.matmul_mod.argtypes = [_i64p, _i64p, _i64p,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        lib.matmul_mod.restype = None
+        lib.scale_blocks_mod.argtypes = [_i64p, _i64p, _i64p,
+                                          ctypes.c_int, ctypes.c_int]
+        lib.scale_blocks_mod.restype = None
+        return lib
+    except OSError:
+        return None
+
+_clib = _load_c_ext()
+_i64p = ctypes.POINTER(ctypes.c_int64)
+
+def _ptr(arr: np.ndarray):
+    return arr.ctypes.data_as(_i64p)
 
 
 def mod(x) -> np.ndarray:
-    return (np.asarray(x).astype(object) % P).astype(np.int64)
+    return np.asarray(x, dtype=np.int64) % _P64
 
 
 def matmul_mod(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    if _clib is not None:
+        A = np.ascontiguousarray(A, dtype=np.int64)
+        B = np.ascontiguousarray(B, dtype=np.int64)
+        m, k = A.shape
+        _, n = B.shape
+        C = np.empty((m, n), dtype=np.int64)
+        _clib.matmul_mod(_ptr(A), _ptr(B), _ptr(C),
+                         ctypes.c_int(m), ctypes.c_int(k), ctypes.c_int(n))
+        return C
     return np.mod(A.astype(object) @ B.astype(object), P).astype(np.int64)
 
 
@@ -55,8 +92,8 @@ def inv_vec(v: np.ndarray) -> np.ndarray:
 
 def to_signed(x: np.ndarray) -> np.ndarray:
     """Map F_P elements back to signed integers in (-P/2, P/2]."""
-    x = x % P
-    return np.where(x > P // 2, x.astype(object) - P, x.astype(object)).astype(np.int64)
+    x = np.asarray(x, dtype=np.int64) % _P64
+    return np.where(x > (P >> 1), x - _P64, x)
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +105,7 @@ SCALE: int = 1 << 10  # 2^10 = 1024 (10 fractional bits)
 
 def quantise(x: np.ndarray) -> np.ndarray:
     """Float → int64, mapped into F_P."""
-    q = np.round(x * SCALE).astype(np.int64)
-    return (q.astype(object) % P).astype(np.int64)
+    return np.round(x * SCALE).astype(np.int64) % _P64
 
 
 def dequantise(x: np.ndarray) -> np.ndarray:
@@ -135,8 +171,14 @@ def emvp_encrypt_query(
 
     q_tilde = mod(c + np.concatenate([np.zeros(k, dtype=np.int64), q_int]))
 
-    blocks  = q_tilde.reshape(s, block_len)
-    scaled  = (blocks.astype(object) * key.alphas.reshape(s, 1).astype(object) % P).astype(np.int64)
+    blocks  = np.ascontiguousarray(q_tilde.reshape(s, block_len), dtype=np.int64)
+    scaled  = np.empty_like(blocks)
+    if _clib is not None:
+        alphas_c = np.ascontiguousarray(key.alphas, dtype=np.int64)
+        _clib.scale_blocks_mod(_ptr(blocks), _ptr(alphas_c), _ptr(scaled),
+                               ctypes.c_int(s), ctypes.c_int(block_len))
+    else:
+        scaled = (blocks.astype(object) * key.alphas.reshape(s, 1).astype(object) % P).astype(np.int64)
     q_hat   = scaled.flatten()
 
     return QueryMessage(q_hat=q_hat), DecodingKey(p_prime=inv_vec(key.alphas))
