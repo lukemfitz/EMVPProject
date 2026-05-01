@@ -67,3 +67,20 @@ void scale_blocks_mod(const int64_t *blocks, const int64_t *alphas,
                 (int64_t)mulmod((uint64_t)blocks[i*block_len + j], alpha);
     }
 }
+
+/*
+ * scalecol_mod — Multiply every element of a 2-D matrix by a single scalar, mod P.
+ * Used for batched block masking: scale an entire (block_len × p) sub-matrix
+ * by one alpha value at once.
+ *
+ * mat:    (rows, cols) row-major int64, values in [0, P-1]
+ * scalar: int64,                        value  in [0, P-1]
+ * result: (rows, cols) row-major int64 output
+ */
+void scalecol_mod(const int64_t *mat, int64_t scalar,
+                  int64_t *result, int rows, int cols) {
+    uint64_t alpha = (uint64_t)scalar;
+    int n = rows * cols;
+    for (int i = 0; i < n; i++)
+        result[i] = (int64_t)mulmod((uint64_t)mat[i], alpha);
+}

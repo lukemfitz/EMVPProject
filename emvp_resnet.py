@@ -54,6 +54,9 @@ def _load_c_ext():
         lib.scale_blocks_mod.argtypes = [_i64p, _i64p, _i64p,
                                           ctypes.c_int, ctypes.c_int]
         lib.scale_blocks_mod.restype = None
+        lib.scalecol_mod.argtypes = [_i64p, ctypes.c_int64, _i64p,
+                                      ctypes.c_int, ctypes.c_int]
+        lib.scalecol_mod.restype = None
         return lib
     except OSError:
         return None
@@ -63,6 +66,19 @@ _i64p = ctypes.POINTER(ctypes.c_int64)
 
 def _ptr(arr: np.ndarray):
     return arr.ctypes.data_as(_i64p)
+
+
+def _scalecol(mat: np.ndarray, scalar: int) -> np.ndarray:
+    """Multiply every element of a 2-D int64 matrix by scalar mod P."""
+    mat = np.ascontiguousarray(mat, dtype=np.int64)
+    result = np.empty_like(mat)
+    if _clib is not None:
+        rows, cols = mat.shape
+        _clib.scalecol_mod(_ptr(mat), ctypes.c_int64(scalar), _ptr(result),
+                           ctypes.c_int(rows), ctypes.c_int(cols))
+    else:
+        result = (mat.astype(object) * scalar % P).astype(np.int64)
+    return result
 
 
 def mod(x) -> np.ndarray:
@@ -199,6 +215,89 @@ def emvp_decode(resp: ResponseMessage, dk: DecodingKey) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Batched EMVP — encrypt p queries, answer, and decode simultaneously
+# ---------------------------------------------------------------------------
+
+def emvp_encrypt_queries_batched(
+    Q_int: np.ndarray,        # (ell, p) int64, values in [0, P-1]
+    key:   EMVPKey,
+    rng:   np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Encrypt p queries simultaneously sharing one key.
+
+    Returns:
+        Q_hat   : (n, p)  int64  — encrypted query matrix
+        p_prime : (s,)    int64  — shared decoding key (1/alpha_j per block)
+    """
+    k, ell, n, s = key.k, key.ell, key.n, key.s
+    block_len = n // s
+    p = Q_int.shape[1]
+
+    # Sample one random blinding vector per query: A (k, p)
+    A = rng.integers(0, P, size=(k, p), dtype=np.int64)
+
+    # Codeword right half: C_right (ell, p) = C1^T @ A
+    # (matches single-query: c_right = a^T @ C1, vectorised over p)
+    C_right = matmul_mod(np.ascontiguousarray(key.C1.T), A)   # (ell, p)
+
+    # Stack into full codeword matrix: C_matrix (n, p)
+    C_matrix = np.vstack([A, C_right])
+
+    # Embed queries: Q_tilde = C_matrix + [0_k; Q_int]
+    # Both summands in [0, P-1] so sum < 2*(P-1) < int64_max — no overflow
+    zeros_k = np.zeros((k, p), dtype=np.int64)
+    Q_tilde = (C_matrix + np.vstack([zeros_k, Q_int])) % _P64  # (n, p)
+
+    # Block masking: scale row-block j by alpha_j (same alpha for all p columns)
+    Q_hat = np.empty((n, p), dtype=np.int64)
+    for j in range(s):
+        block = np.ascontiguousarray(Q_tilde[j*block_len:(j+1)*block_len, :])
+        Q_hat[j*block_len:(j+1)*block_len, :] = _scalecol(block, int(key.alphas[j]))
+
+    return Q_hat, inv_vec(key.alphas)   # p_prime shape (s,), shared across batch
+
+
+def emvp_server_answer_batched(
+    M_hat: np.ndarray,   # (m, n)  int64
+    Q_hat: np.ndarray,   # (n, p)  int64
+    s:     int,
+) -> np.ndarray:
+    """
+    Compute the s block matrix-matrix products.
+
+    Returns M_blocks : (m, s, p)  int64
+        M_blocks[:, j, :] = M_hat_j @ Q_hat_j  for each block j in [0, s)
+    """
+    m, n = M_hat.shape
+    _, p = Q_hat.shape
+    block_len = n // s
+    M_blocks = np.empty((m, s, p), dtype=np.int64)
+    for j in range(s):
+        M_hat_j = np.ascontiguousarray(M_hat[:, j*block_len:(j+1)*block_len])
+        Q_hat_j = np.ascontiguousarray(Q_hat[j*block_len:(j+1)*block_len, :])
+        M_blocks[:, j, :] = matmul_mod(M_hat_j, Q_hat_j)
+    return M_blocks
+
+
+def emvp_decode_batched(
+    M_blocks: np.ndarray,  # (m, s, p)  int64
+    p_prime:  np.ndarray,  # (s,)       int64  shared decoding key
+) -> np.ndarray:
+    """
+    Weighted sum over blocks: out[:, col] = sum_j M_blocks[:, j, col] / alpha_j
+
+    Returns decoded : (m, p)  int64  (still in SCALE^2 units)
+    """
+    m, s, p = M_blocks.shape
+    # Accumulate s terms, each in [0, P-1].  For s<=4: sum < 4*(P-1) < int64_max
+    out = np.zeros((m, p), dtype=np.int64)
+    for j in range(s):
+        out += _scalecol(np.ascontiguousarray(M_blocks[:, j, :]), int(p_prime[j]))
+    return out % _P64
+
+
+# ---------------------------------------------------------------------------
 # 3.  EMVP layer wrapper
 # ---------------------------------------------------------------------------
 
@@ -246,6 +345,16 @@ class EMVPLayer:
         msg, dk = self.client_encrypt(activation)
         resp    = self.server_answer(msg)
         return self.client_decode(resp, dk)
+
+    def forward_batched(self, act_matrix: np.ndarray) -> np.ndarray:
+        """
+        act_matrix : (ell, p)  float64 — p activation vectors as columns
+        returns    : (m,   p)  float64
+        """
+        Q_int    = quantise(act_matrix)
+        Q_hat, p_prime = emvp_encrypt_queries_batched(Q_int, self.key, self.rng)
+        M_blocks = emvp_server_answer_batched(self.M_hat, Q_hat, self.key.s)
+        return dequantise(emvp_decode_batched(M_blocks, p_prime))
 
     def plaintext_forward(self, activation: np.ndarray) -> np.ndarray:
         return self._M_float @ activation
@@ -359,12 +468,7 @@ class ConvBNReLU:
         C, H, W      = x.shape
         out_H, out_W = self._out_shape(H, W)
         col          = im2col(x.astype(np.float64), self.kH, self.kW, self.stride, self.pad)
-        n_patches    = col.shape[1]
-
-        out_flat = np.zeros((self.C_out, n_patches), dtype=np.float64)
-        for j in range(n_patches):
-            out_flat[:, j] = self.emvp.forward(col[:, j])
-
+        out_flat     = self.emvp.forward_batched(col)   # (C_out, n_patches)
         out = (out_flat + self.b_fold[:, None]).reshape(self.C_out, out_H, out_W)
         return relu(out.astype(np.float32))
 
