@@ -39,7 +39,8 @@ import time
 import numpy as np
 import os, sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 from emvp_resnet import ResNet
 
 
@@ -47,7 +48,7 @@ def load_cifar10(n: int):
     """Try real CIFAR-10; fall back to synthetic-but-realistic images."""
     try:
         import torchvision, torchvision.transforms as T
-        dset = torchvision.datasets.CIFAR10("./data", train=False, download=True,
+        dset = torchvision.datasets.CIFAR10(os.path.join(_ROOT, "data"), train=False, download=True,
                                              transform=T.ToTensor())
         imgs, labs = [], []
         for img, label in dset:
@@ -121,7 +122,8 @@ def main():
     print("EMVP timing side-channel audit")
     print("=" * 75)
 
-    weights = np.load("cifar10_weights.npy", allow_pickle=True).item()
+    weights = np.load(os.path.join(_ROOT, "weights", "cifar10_weights.npy"),
+                      allow_pickle=True).item()
     model = ResNet(n_blocks=2, num_classes=10, C_in=3, k=16, s=4,
                    seed=42, weights=weights)
 

@@ -13,20 +13,23 @@ is saved as {dataset}_weights.npy for use with emvp_resnet.py.
 
 Usage
 -----
-  python3 train.py                    # both datasets, n_blocks=2
-  python3 train.py --dataset mnist    # MNIST only
-  python3 train.py --dataset cifar10  # CIFAR-10 only
-  python3 train.py --n-blocks 1       # smaller / faster model
+  python3 scripts/train.py                    # both datasets, n_blocks=2
+  python3 scripts/train.py --dataset mnist    # MNIST only
+  python3 scripts/train.py --dataset cifar10  # CIFAR-10 only
+  python3 scripts/train.py --n-blocks 1       # smaller / faster model
 """
 
 from __future__ import annotations
-import argparse, time
+import argparse, os, sys, time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as T
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from emvp_resnet import batch_norm_fold
 
@@ -133,8 +136,8 @@ def extract_weights(model: SmallResNet) -> dict:
 
 def mnist_loaders(batch_size: int = 128):
     tf = T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
-    train = torchvision.datasets.MNIST("./data", train=True,  download=True, transform=tf)
-    test  = torchvision.datasets.MNIST("./data", train=False, download=True, transform=tf)
+    train = torchvision.datasets.MNIST(os.path.join(_ROOT, "data"), train=True,  download=True, transform=tf)
+    test  = torchvision.datasets.MNIST(os.path.join(_ROOT, "data"), train=False, download=True, transform=tf)
     return (
         torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True,  num_workers=0),
         torch.utils.data.DataLoader(test,  batch_size=256,        shuffle=False, num_workers=0),
@@ -150,8 +153,8 @@ def cifar10_loaders(batch_size: int = 128):
         T.Normalize(mean, std),
     ])
     test_tf = T.Compose([T.ToTensor(), T.Normalize(mean, std)])
-    train = torchvision.datasets.CIFAR10("./data", train=True,  download=True, transform=train_tf)
-    test  = torchvision.datasets.CIFAR10("./data", train=False, download=True, transform=test_tf)
+    train = torchvision.datasets.CIFAR10(os.path.join(_ROOT, "data"), train=True,  download=True, transform=train_tf)
+    test  = torchvision.datasets.CIFAR10(os.path.join(_ROOT, "data"), train=False, download=True, transform=test_tf)
     return (
         torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True,  num_workers=0),
         torch.utils.data.DataLoader(test,  batch_size=256,        shuffle=False, num_workers=0),
@@ -234,7 +237,9 @@ def train(
     print(f"\n  Final test accuracy: {final_acc*100:.2f}%", flush=True)
 
     weights = extract_weights(model)
-    path = f"{dataset}_weights.npy"
+    weights_dir = os.path.join(_ROOT, "weights")
+    os.makedirs(weights_dir, exist_ok=True)
+    path = os.path.join(weights_dir, f"{dataset}_weights.npy")
     np.save(path, weights)
     print(f"  Weights saved → {path}", flush=True)
     return weights

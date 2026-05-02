@@ -21,12 +21,20 @@ Only query privacy is implemented (M is public, q is private).
 
 ---
 
-## Files in This Project
+## Layout
 
-| File | Purpose |
-|---|---|
-| `emvp_resnet.py` | Main implementation: EMVP protocol + ResNet model |
-| `benchmark_emvp.py` | Timing and accuracy comparison: plaintext vs EMVP |
+```
+src/         emvp_resnet.py, emvp_core.{c,so}     # core library
+scripts/     train.py, benchmark.py, benchmark_mnist.py,
+             benchmark_checksum.py, plot_benchmark.py, timing_audit.py
+weights/     mnist_weights.npy, cifar10_weights.npy
+results/     benchmark_results.{md,png}, benchmark_checksum_results.txt
+docs/        VERIFY_PLAN.md, VERIFY_ACTIONS.md, batch-GPU.md
+data/        dataset cache (gitignored, downloaded on demand)
+```
+
+`scripts/` files all add `src/` to `sys.path` via a small shim, so they
+import `emvp_resnet` directly. Run from the project root.
 
 ---
 
@@ -277,30 +285,35 @@ plt.axis('off'); plt.show()
 
 ## Running the Code
 
-```bash
-# Smoke test (no PyTorch needed — uses random weights)
-python emvp_resnet.py
+All commands run from the project root.
 
-# Benchmark: plaintext vs EMVP timing and accuracy
-python benchmark_emvp.py
+```bash
+# 0. (one-time) compile the C extension
+cc -O3 -march=native -shared -fPIC -o src/emvp_core.so src/emvp_core.c
+
+# Smoke test (no PyTorch needed — uses random weights, prints
+# plaintext / EMVP / EMVP+checksum honest / EMVP+checksum cheating outputs)
+python3 src/emvp_resnet.py
+
+# Plaintext vs EMVP, with pretrained weights from weights/*.npy
+python3 scripts/benchmark.py
+
+# EMVP with vs without the Freivalds checksum, including a cheating-server run
+python3 scripts/benchmark_checksum.py
 ```
 
-In Colab with pretrained weights:
+In Colab or another notebook (paths assume the project root is the cwd):
 ```python
-from emvp_resnet import extract_resnet_weights, ResNet
-from benchmark_emvp import run_benchmark
+import sys; sys.path.insert(0, "src")
+from emvp_resnet import ResNet
+import numpy as np
 
-import torchvision
-resnet_pt = torchvision.models.resnet18(pretrained=True)
-weights   = extract_resnet_weights(resnet_pt)
+weights = np.load("weights/cifar10_weights.npy", allow_pickle=True).item()
+model   = ResNet(n_blocks=2, num_classes=10, C_in=3, k=16, s=4, weights=weights)
 
-# Single inference
-model  = ResNet(weights=weights, n_blocks=2, num_classes=1000, k=32, s=4)
-logits = model.emvp_forward(horse_img)
-
-# Full benchmark
-results = run_benchmark(weights=weights, n_images=10,
-                        image_source=x_test, label_source=y_test)
+logits          = model.emvp_forward(image)                       # plain EMVP
+logits, passed  = model.emvp_forward_with_verify(image)           # + checksum
+logits, passed  = model.emvp_forward_with_verify(image, cheat=True)  # cheat sim
 ```
 
 ---

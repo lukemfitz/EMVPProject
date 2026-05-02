@@ -15,15 +15,18 @@ fails with prob 1 - 1/P, so the per-image detection rate is essentially 100%.
 
 Usage
 -----
-  python3 benchmark_checksum.py                  # both datasets, default counts
-  python3 benchmark_checksum.py --dataset mnist  # MNIST only
-  python3 benchmark_checksum.py --n-emvp 50 --n-cheat 50
+  python3 scripts/benchmark_checksum.py                  # both datasets
+  python3 scripts/benchmark_checksum.py --dataset mnist  # MNIST only
+  python3 scripts/benchmark_checksum.py --n-emvp 50 --n-cheat 50
 """
 
 from __future__ import annotations
 
 import argparse, os, sys, time
 import numpy as np
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from emvp_resnet import ResNet, softmax
 
@@ -48,7 +51,7 @@ def _norm_cifar(img): return (img - _CIFAR_MEAN[:, None, None]) / _CIFAR_STD[:, 
 def _load_torchvision(dataset, n):
     import torchvision, torchvision.transforms as T
     cls  = torchvision.datasets.MNIST if dataset == "mnist" else torchvision.datasets.CIFAR10
-    dset = cls("./data", train=False, download=True, transform=T.ToTensor())
+    dset = cls(os.path.join(_ROOT, "data"), train=False, download=True, transform=T.ToTensor())
     imgs, labs = [], []
     for img, label in dset:
         imgs.append(img.numpy())
@@ -66,7 +69,8 @@ def _load_parquet(dataset, n):
         from PIL import Image
     except ImportError:
         return None
-    path = f"data/cifar10_hf/test.parquet" if dataset == "cifar10" else f"data/mnist_hf/test.parquet"
+    sub  = "cifar10_hf" if dataset == "cifar10" else "mnist_hf"
+    path = os.path.join(_ROOT, "data", sub, "test.parquet")
     if not os.path.exists(path):
         return None
     table = pq.read_table(path)
@@ -120,11 +124,13 @@ def load_data(dataset, n):
 _CONFIG = {
     "mnist": dict(
         C_in=1, n_blocks=2, num_classes=10,
-        normalize=_norm_mnist, weight_file="mnist_weights.npy",
+        normalize=_norm_mnist,
+        weight_file=os.path.join(_ROOT, "weights", "mnist_weights.npy"),
     ),
     "cifar10": dict(
         C_in=3, n_blocks=2, num_classes=10,
-        normalize=_norm_cifar, weight_file="cifar10_weights.npy",
+        normalize=_norm_cifar,
+        weight_file=os.path.join(_ROOT, "weights", "cifar10_weights.npy"),
     ),
 }
 

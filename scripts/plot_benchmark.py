@@ -1,8 +1,11 @@
 """Generate benchmark_results.png from saved benchmark numbers."""
 
+import os
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Data ────────────────────────────────────────────────────────────────────
 
@@ -166,6 +169,7 @@ ax6.set_title("Summary", fontsize=11, fontweight="bold", pad=8)
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 
-out = "benchmark_results.png"
+out = os.path.join(_ROOT, "results", "benchmark_results.png")
+os.makedirs(os.path.dirname(out), exist_ok=True)
 fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
 print(f"Saved {out}")
