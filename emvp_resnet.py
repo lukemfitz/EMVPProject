@@ -31,6 +31,12 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+try:
+    import torch as _torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # 0.  Field arithmetic
@@ -96,6 +102,94 @@ def matmul_mod(A: np.ndarray, B: np.ndarray) -> np.ndarray:
                          ctypes.c_int(m), ctypes.c_int(k), ctypes.c_int(n))
         return C
     return np.mod(A.astype(object) @ B.astype(object), P).astype(np.int64)
+
+
+# ---------------------------------------------------------------------------
+# CUDA GPU path for modular matrix multiplication
+# ---------------------------------------------------------------------------
+
+_SPLIT_BITS  = 21
+_SPLIT_MASK  = (1 << _SPLIT_BITS) - 1
+_POW63_MOD_P = 4          # 2^63 mod P: 2^61 ≡ 1, so 2^63 = 4·2^61 ≡ 4
+_POW84_MOD_P = 1 << 23    # 2^84 mod P: 2^84 = 2^23·2^61 ≡ 2^23
+
+
+def _probe_gpu_device() -> Optional[str]:
+    """Return 'cuda' if a CUDA GPU with float64 support is available, else None."""
+    if not _TORCH_AVAILABLE:
+        return None
+    if _torch.cuda.is_available():
+        return "cuda"
+    return None
+
+
+def matmul_mod_gpu(A: np.ndarray, B: np.ndarray, device: str) -> np.ndarray:
+    """
+    Exact A @ B mod P via a 3-way 21-bit limb split on a CUDA GPU.
+
+    Each 61-bit value is written as lo + mid·2^21 + hi·2^42.  Every limb
+    product is < 2^42, and summing ≤ 2048 of them stays < 2^53 (float64
+    mantissa), so all nine sub-products are exact.
+
+    All nine limb-pair products are computed in one torch.einsum call
+    (A_limbs: 3×m×k, B_limbs: 3×k×p → C_grid: 3×3×m×p) to minimise
+    kernel-launch overhead.  The result is assembled mod P on CPU using
+    _scalecol (C extension) for the large-scalar multiplies.
+    Falls back to matmul_mod (C extension / object arrays) on any error.
+    """
+    try:
+        m, k = A.shape
+        _, p = B.shape
+
+        # Build (3, m, k) and (3, k, p) limb tensors in one go
+        shifts = [0, _SPLIT_BITS, 2 * _SPLIT_BITS]
+        A_limbs = _torch.stack([
+            _torch.tensor((A >> sh) & _SPLIT_MASK, dtype=_torch.float64, device=device)
+            for sh in shifts
+        ])  # (3, m, k)
+        B_limbs = _torch.stack([
+            _torch.tensor((B >> sh) & _SPLIT_MASK, dtype=_torch.float64, device=device)
+            for sh in shifts
+        ])  # (3, k, p)
+
+        # One einsum: all 9 limb-pair products at once → (3, 3, m, p)
+        C_grid = _torch.einsum("imk,jkp->ijmp", A_limbs, B_limbs)
+        C = C_grid.cpu().numpy().round().astype(np.int64)  # (3, 3, m, p)
+
+        # Assemble: A·B = Σ_{i,j} C[i,j] · 2^(21*(i+j))  mod P
+        # Group by exponent e = i+j:
+        #   e=0: C[0,0]                 · 1
+        #   e=1: C[0,1]+C[1,0]         · 2^21
+        #   e=2: C[0,2]+C[1,1]+C[2,0] · 2^42
+        #   e=3: C[1,2]+C[2,1]         · 2^63 ≡ 4  mod P
+        #   e=4: C[2,2]                · 2^84 ≡ 2^23 mod P
+        #
+        # Each C[i,j] ≤ k_dim·2^42 ≤ 2^49 (fits in int64).  Adding ≤ 3
+        # such values yields < 2^51 < P, so the grouped sums are already
+        # reduced mod P without any extra work.  Adding two values in
+        # [0, P) gives ≤ 2P-2 < 2^62 < int64 max, so one step of % _P64
+        # is safe throughout.  _scalecol handles the large-scalar multiplies.
+        S21 = 1 << _SPLIT_BITS
+        S42 = 1 << (2 * _SPLIT_BITS)
+
+        groups = [
+            C[0, 0],
+            C[0, 1] + C[1, 0],
+            C[0, 2] + C[1, 1] + C[2, 0],
+            C[1, 2] + C[2, 1],
+            C[2, 2],
+        ]
+        scalars = [1, S21, S42, _POW63_MOD_P, _POW84_MOD_P]
+
+        result = np.zeros((m, p), dtype=np.int64)
+        for g, sc in zip(groups, scalars):
+            term = g if sc == 1 else _scalecol(np.ascontiguousarray(g), sc)
+            result = (result + term) % _P64
+
+        return result
+
+    except Exception:
+        return matmul_mod(A, B)
 
 
 def inv_mod(a: int) -> int:
@@ -259,24 +353,30 @@ def emvp_encrypt_queries_batched(
 
 
 def emvp_server_answer_batched(
-    M_hat: np.ndarray,   # (m, n)  int64
-    Q_hat: np.ndarray,   # (n, p)  int64
-    s:     int,
+    M_hat:  np.ndarray,          # (m, n)  int64
+    Q_hat:  np.ndarray,          # (n, p)  int64
+    s:      int,
+    device: Optional[str] = None,
 ) -> np.ndarray:
     """
     Compute the s block matrix-matrix products.
 
     Returns M_blocks : (m, s, p)  int64
         M_blocks[:, j, :] = M_hat_j @ Q_hat_j  for each block j in [0, s)
+
+    If device is 'cuda' (or any torch device string), the per-block products
+    are computed via matmul_mod_gpu; otherwise the C extension / object-array
+    fallback is used.
     """
     m, n = M_hat.shape
     _, p = Q_hat.shape
     block_len = n // s
-    M_blocks = np.empty((m, s, p), dtype=np.int64)
+    M_blocks  = np.empty((m, s, p), dtype=np.int64)
+    _mm = (lambda A, B: matmul_mod_gpu(A, B, device)) if device else matmul_mod
     for j in range(s):
         M_hat_j = np.ascontiguousarray(M_hat[:, j*block_len:(j+1)*block_len])
         Q_hat_j = np.ascontiguousarray(Q_hat[j*block_len:(j+1)*block_len, :])
-        M_blocks[:, j, :] = matmul_mod(M_hat_j, Q_hat_j)
+        M_blocks[:, j, :] = _mm(M_hat_j, Q_hat_j)
     return M_blocks
 
 
@@ -311,11 +411,13 @@ class EMVPLayer:
         self, M: np.ndarray, name: str,
         k: int = 16, s: int = 4,
         rng: Optional[np.random.Generator] = None,
+        use_gpu: bool = False,
     ):
         self.name         = name
         self.m, self.ell  = M.shape
         self.rng          = rng or np.random.default_rng(0)
         self._M_float     = M.copy()  # kept for plaintext reference
+        self.device       = _probe_gpu_device() if use_gpu else None
 
         # Ensure n = k+ell is divisible by s
         n = k + self.ell
@@ -353,7 +455,7 @@ class EMVPLayer:
         """
         Q_int    = quantise(act_matrix)
         Q_hat, p_prime = emvp_encrypt_queries_batched(Q_int, self.key, self.rng)
-        M_blocks = emvp_server_answer_batched(self.M_hat, Q_hat, self.key.s)
+        M_blocks = emvp_server_answer_batched(self.M_hat, Q_hat, self.key.s, self.device)
         return dequantise(emvp_decode_batched(M_blocks, p_prime))
 
     def plaintext_forward(self, activation: np.ndarray) -> np.ndarray:
@@ -428,6 +530,7 @@ class ConvBNReLU:
         k: int = 32, s: int = 4,
         rng: Optional[np.random.Generator] = None,
         weights: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        use_gpu: bool = False,
     ):
         self.C_out  = C_out
         self.kH, self.kW = kH, kW
@@ -449,7 +552,7 @@ class ConvBNReLU:
             self.W_fold, self.b_fold = batch_norm_fold(W, gamma, beta, mean, var)
 
         W_mat      = self.W_fold.reshape(C_out, -1).astype(np.float64)
-        self.emvp  = EMVPLayer(W_mat, name=name, k=k, s=s, rng=rng)
+        self.emvp  = EMVPLayer(W_mat, name=name, k=k, s=s, rng=rng, use_gpu=use_gpu)
 
     def _out_shape(self, H: int, W: int) -> Tuple[int, int]:
         out_H = (H + 2 * self.pad - self.kH) // self.stride + 1
@@ -482,19 +585,21 @@ class ResidualBlock:
         k: int = 32, s: int = 4,
         rng: Optional[np.random.Generator] = None,
         weights: Optional[dict] = None,
+        use_gpu: bool = False,
     ):
         w   = weights or {}
         rng = rng or np.random.default_rng(0)
         self.conv1 = ConvBNReLU(C_in,  C_out, stride=stride, name=f"{name}.conv1",
-                                k=k, s=s, rng=rng, weights=w.get("conv1"))
+                                k=k, s=s, rng=rng, weights=w.get("conv1"), use_gpu=use_gpu)
         self.conv2 = ConvBNReLU(C_out, C_out, stride=1,      name=f"{name}.conv2",
-                                k=k, s=s, rng=rng, weights=w.get("conv2"))
+                                k=k, s=s, rng=rng, weights=w.get("conv2"), use_gpu=use_gpu)
 
         self.shortcut: Optional[ConvBNReLU] = None
         if C_in != C_out or stride != 1:
             self.shortcut = ConvBNReLU(
                 C_in, C_out, kH=1, kW=1, stride=stride, pad=0,
                 name=f"{name}.shortcut", k=k, s=s, rng=rng, weights=w.get("shortcut"),
+                use_gpu=use_gpu,
             )
 
     def plaintext_forward(self, x: np.ndarray) -> np.ndarray:
@@ -527,6 +632,7 @@ class LinearClassifier:
         k: int = 16, s: int = 4,
         rng: Optional[np.random.Generator] = None,
         weights: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        use_gpu: bool = False,
     ):
         rng = rng or np.random.default_rng(0)
         if weights is not None:
@@ -537,7 +643,7 @@ class LinearClassifier:
             W     *= np.sqrt(2.0 / C_in)
             self.b = np.zeros(num_classes, dtype=np.float64)
         self.W    = W
-        self.emvp = EMVPLayer(W, name=name, k=k, s=s, rng=rng)
+        self.emvp = EMVPLayer(W, name=name, k=k, s=s, rng=rng, use_gpu=use_gpu)
 
     def plaintext_forward(self, x: np.ndarray) -> np.ndarray:
         return self.W @ x + self.b
@@ -572,10 +678,11 @@ class ResNet:
         s: int = 4,
         seed: int = 42,
         weights: Optional[dict] = None,
+        use_gpu: bool = False,
     ):
         w   = weights or {}
         rng = np.random.default_rng(seed)
-        kw  = dict(k=k, s=s, rng=rng)
+        kw  = dict(k=k, s=s, rng=rng, use_gpu=use_gpu)
 
         self.conv1  = ConvBNReLU(C_in, 16, name="conv1", weights=w.get("conv1"), **kw)
 
