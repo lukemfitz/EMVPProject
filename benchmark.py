@@ -18,7 +18,7 @@ Usage
 -----
   python3 benchmark.py                  # both datasets, default image counts
   python3 benchmark.py --dataset mnist  # MNIST only
-  python3 benchmark.py --n-plain 200 --n-emvp 5
+  python3 benchmark.py --n-plain 500 --n-emvp 100
 """
 
 from __future__ import annotations
@@ -218,10 +218,10 @@ def run_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EMVP vs plaintext benchmark")
     parser.add_argument("--dataset",  choices=["mnist", "cifar10", "both"], default="both")
-    parser.add_argument("--n-plain",  type=int, default=500,
-                        help="Images for plaintext pass (default: 500)")
-    parser.add_argument("--n-emvp",   type=int, default=20,
-                        help="Images for EMVP pass (default: 20; EMVP is slow)")
+    parser.add_argument("--n-plain",  type=int, default=1000,
+                        help="Images for plaintext pass (default: 1000)")
+    parser.add_argument("--n-emvp",   type=int, default=1000,
+                        help="Images for EMVP pass (default: 1000)")
     parser.add_argument("--k",        type=int, default=16,
                         help="EMVP key dimension k (default: 16)")
     parser.add_argument("--s",        type=int, default=4,
