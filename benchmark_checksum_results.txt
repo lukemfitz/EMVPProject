@@ -1,0 +1,93 @@
+
+======================================================================
+MNIST  —  Checksum benchmark
+======================================================================
+  Loaded weights from mnist_weights.npy
+  Images loaded: 200  shape=(1, 28, 28)
+
+  [1/4] Plaintext  (200 images) …
+        accuracy   : 100.0%  (200/200)
+        per image  : 4.18 ms
+
+  [2/4] EMVP, no checksum  (200 images) …
+        accuracy   : 100.0%  (200/200)
+        per image  : 37.49 ms
+
+  [3/4] EMVP + checksum, honest  (200 images) …
+        accuracy        : 100.0%  (200/200)
+        verification ok : 200/200  (100.0%)
+        per image       : 40.05 ms
+
+  [4/4] EMVP + checksum, cheating  (200 images) …
+        per image       : 43.09 ms
+        detection rate  : 200/200  (100.0%)
+        accuracy if no verification : 10.5%  (would be silently wrong)
+
+  ──────────────────────────────────────────────────────────────────
+  SUMMARY
+  ──────────────────────────────────────────────────────────────────
+    Condition                                  acc     ms/img
+    plaintext                               100.0%      4.18
+    EMVP, no checksum                       100.0%     37.49
+    EMVP + checksum, honest                 100.0%     40.05
+    EMVP + checksum, cheating              (reject)     43.09
+
+    Checksum overhead vs. EMVP        : +2.56 ms/image  (+6.8%)
+    EMVP vs EMVP+verify agreement     : 100.0%  (200/200)
+    Honest verification pass rate     : 100.0%  (expected 100%)
+    Cheating detection rate           : 100.0%  (expected ~100%)
+======================================================================
+
+======================================================================
+CIFAR10  —  Checksum benchmark
+======================================================================
+  Loaded weights from cifar10_weights.npy
+  Images loaded: 200  shape=(3, 32, 32)
+
+  [1/4] Plaintext  (200 images) …
+        accuracy   : 88.5%  (177/200)
+        per image  : 7.40 ms
+
+  [2/4] EMVP, no checksum  (200 images) …
+        accuracy   : 88.5%  (177/200)
+        per image  : 62.76 ms
+
+  [3/4] EMVP + checksum, honest  (200 images) …
+        accuracy        : 88.5%  (177/200)
+        verification ok : 200/200  (100.0%)
+        per image       : 64.86 ms
+
+  [4/4] EMVP + checksum, cheating  (200 images) …
+        per image       : 62.77 ms
+        detection rate  : 200/200  (100.0%)
+        accuracy if no verification : 8.0%  (would be silently wrong)
+
+  ──────────────────────────────────────────────────────────────────
+  SUMMARY
+  ──────────────────────────────────────────────────────────────────
+    Condition                                  acc     ms/img
+    plaintext                                88.5%      7.40
+    EMVP, no checksum                        88.5%     62.76
+    EMVP + checksum, honest                  88.5%     64.86
+    EMVP + checksum, cheating              (reject)     62.77
+
+    Checksum overhead vs. EMVP        : +2.10 ms/image  (+3.4%)
+    EMVP vs EMVP+verify agreement     : 100.0%  (200/200)
+    Honest verification pass rate     : 100.0%  (expected 100%)
+    Cheating detection rate           : 100.0%  (expected ~100%)
+======================================================================
+
+======================================================================
+OVERALL
+======================================================================
+  metric                                     MNIST        CIFAR-10
+  plaintext (ms/img)                          4.18            7.40
+  EMVP (ms/img)                              37.49           62.76
+  EMVP + checksum (ms/img)                   40.05           64.86
+  checksum overhead                           6.8%            3.4%
+  plaintext accuracy                        100.0%           88.5%
+  EMVP accuracy                             100.0%           88.5%
+  EMVP+checksum accuracy                    100.0%           88.5%
+  honest pass rate                          100.0%          100.0%
+  cheat detection rate                      100.0%          100.0%
+======================================================================

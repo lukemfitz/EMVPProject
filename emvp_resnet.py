@@ -302,6 +302,18 @@ def emvp_decode_batched(
 # 3.  EMVP layer wrapper
 # ---------------------------------------------------------------------------
 
+def _apply_cheat(arr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """
+    Simulate a cheating server: flip one random entry of the encoded response
+    by adding 1 mod P. This is the smallest possible in-field cheat — the
+    Freivalds check should still catch it with probability 1 - 1/P.
+    """
+    arr = arr.copy()
+    idx = tuple(int(rng.integers(0, dim)) for dim in arr.shape)
+    arr[idx] = int((int(arr[idx]) + 1) % P)
+    return arr
+
+
 class EMVPLayer:
     """
     Wraps a weight matrix so the server stores M_hat and answers encrypted
@@ -325,7 +337,8 @@ class EMVPLayer:
             n  = k + self.ell
 
         self.key   = emvp_keygen(self.ell, k, s, self.rng)
-        self.M_hat = emvp_encode_matrix(quantise(M), self.key)
+        self.M_int = quantise(M)                       # cached for Freivalds check
+        self.M_hat = emvp_encode_matrix(self.M_int, self.key)
 
     # -- client ---------------------------------------------------------------
 
@@ -356,6 +369,59 @@ class EMVPLayer:
         Q_hat, p_prime = emvp_encrypt_queries_batched(Q_int, self.key, self.rng)
         M_blocks = emvp_server_answer_batched(self.M_hat, Q_hat, self.key.s)
         return dequantise(emvp_decode_batched(M_blocks, p_prime))
+
+    # -- verified (Freivalds checksum) variants -------------------------------
+
+    def _verify_freivalds(self, Q_int: np.ndarray, decoded_int: np.ndarray) -> bool:
+        """
+        Pick random r ∈ F_p^m, check r^T @ M_int @ Q_int  ==  r^T @ decoded_int
+        (all in F_p). If the server tampered, equality fails with prob 1-1/P.
+
+        Q_int       : (ell,) or (ell, p)  int64 in [0,P)
+        decoded_int : (m,)   or (m, p)    int64 in [0,P)
+        """
+        is_single = (Q_int.ndim == 1)
+        Q2 = Q_int.reshape(-1, 1)         if is_single else Q_int
+        D2 = decoded_int.reshape(-1, 1)   if is_single else decoded_int
+
+        r = self.rng.integers(0, P, size=(self.m,), dtype=np.int64)
+        u = matmul_mod(r.reshape(1, -1), self.M_int).flatten()        # (ell,)
+        c_expected = matmul_mod(u.reshape(1, -1), Q2).flatten()       # (p,)
+        c_received = matmul_mod(r.reshape(1, -1), D2).flatten()       # (p,)
+        return bool(np.array_equal(c_expected, c_received))
+
+    def forward_with_verify(
+        self, activation: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        """
+        Single-query EMVP with Freivalds verification.
+        Returns (result_float, verification_passed).
+        """
+        Q_int   = quantise(activation)
+        msg, dk = emvp_encrypt_query(Q_int, self.key, self.rng)
+        M_prime = emvp_server_answer(self.M_hat, msg, self.key.s).M_prime
+        if cheat:
+            M_prime = _apply_cheat(M_prime, self.rng)
+        decoded_int = emvp_decode(ResponseMessage(M_prime=M_prime), dk)
+        passed      = self._verify_freivalds(Q_int, decoded_int)
+        return dequantise(decoded_int), passed
+
+    def forward_batched_with_verify(
+        self, act_matrix: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        """
+        Batched EMVP with Freivalds verification. One r per call (covers
+        all p columns simultaneously).
+        Returns (result_float (m,p), verification_passed).
+        """
+        Q_int          = quantise(act_matrix)
+        Q_hat, p_prime = emvp_encrypt_queries_batched(Q_int, self.key, self.rng)
+        M_blocks       = emvp_server_answer_batched(self.M_hat, Q_hat, self.key.s)
+        if cheat:
+            M_blocks = _apply_cheat(M_blocks, self.rng)
+        decoded_int = emvp_decode_batched(M_blocks, p_prime)
+        passed      = self._verify_freivalds(Q_int, decoded_int)
+        return dequantise(decoded_int), passed
 
     def plaintext_forward(self, activation: np.ndarray) -> np.ndarray:
         return self._M_float @ activation
@@ -473,6 +539,16 @@ class ConvBNReLU:
         out = (out_flat + self.b_fold[:, None]).reshape(self.C_out, out_H, out_W)
         return relu(out.astype(np.float32))
 
+    def emvp_forward_with_verify(
+        self, x: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        C, H, W      = x.shape
+        out_H, out_W = self._out_shape(H, W)
+        col          = im2col(x.astype(np.float64), self.kH, self.kW, self.stride, self.pad)
+        out_flat, passed = self.emvp.forward_batched_with_verify(col, cheat=cheat)
+        out = (out_flat + self.b_fold[:, None]).reshape(self.C_out, out_H, out_W)
+        return relu(out.astype(np.float32)), passed
+
 
 class ResidualBlock:
     """Two ConvBNReLU layers with an optional 1×1 shortcut."""
@@ -514,6 +590,17 @@ class ResidualBlock:
             residual = self.shortcut.emvp_forward(x)
         return relu(out + residual)
 
+    def emvp_forward_with_verify(
+        self, x: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        residual = x
+        out, p1  = self.conv1.emvp_forward_with_verify(x, cheat=cheat)
+        out, p2  = self.conv2.emvp_forward_with_verify(out, cheat=cheat)
+        p3       = True
+        if self.shortcut:
+            residual, p3 = self.shortcut.emvp_forward_with_verify(x, cheat=cheat)
+        return relu(out + residual), (p1 and p2 and p3)
+
 
 class GlobalAveragePool:
     @staticmethod
@@ -545,6 +632,12 @@ class LinearClassifier:
 
     def emvp_forward(self, x: np.ndarray) -> np.ndarray:
         return self.emvp.forward(x.astype(np.float64)) + self.b
+
+    def emvp_forward_with_verify(
+        self, x: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        out, passed = self.emvp.forward_with_verify(x.astype(np.float64), cheat=cheat)
+        return out + self.b, passed
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +714,32 @@ class ResNet:
     def emvp_forward(self, x: np.ndarray) -> np.ndarray:
         return self._run(x, mode="emvp")
 
+    def emvp_forward_with_verify(
+        self, x: np.ndarray, cheat: bool = False,
+    ) -> Tuple[np.ndarray, bool]:
+        """
+        EMVP forward pass with per-layer Freivalds checksum verification.
+        If `cheat`, every server response is corrupted (one entry flipped
+        mod P) before decoding, simulating a malicious server.
+        Returns (logits, all_layers_passed).
+        """
+        all_passed = True
+        out, p     = self.conv1.emvp_forward_with_verify(x, cheat=cheat)
+        all_passed = all_passed and p
+        for block in self.stage1:
+            out, p = block.emvp_forward_with_verify(out, cheat=cheat)
+            all_passed = all_passed and p
+        for block in self.stage2:
+            out, p = block.emvp_forward_with_verify(out, cheat=cheat)
+            all_passed = all_passed and p
+        for block in self.stage3:
+            out, p = block.emvp_forward_with_verify(out, cheat=cheat)
+            all_passed = all_passed and p
+        out    = self.gap.forward(out)
+        out, p = self.fc.emvp_forward_with_verify(out, cheat=cheat)
+        all_passed = all_passed and p
+        return out, all_passed
+
 
 # ---------------------------------------------------------------------------
 # 7.  Utilities
@@ -670,6 +789,18 @@ def demo():
     print(f"  L2 error in logits      : {l2_err:.6f}")
     print(f"  Max abs error in logits : {np.abs(logits_plain - logits_emvp).max():.6f}")
     print(f"  Predictions match       : {np.argmax(logits_plain) == np.argmax(logits_emvp)}")
+    print()
+
+    print("Running EMVP + checksum (honest server) …", flush=True)
+    logits_v, passed_v = model.emvp_forward_with_verify(x, cheat=False)
+    print(f"  All layers verified : {passed_v}")
+    print(f"  Pred                : class {np.argmax(logits_v)}")
+    print()
+
+    print("Running EMVP + checksum (cheating server) …", flush=True)
+    logits_c, passed_c = model.emvp_forward_with_verify(x, cheat=True)
+    print(f"  All layers verified : {passed_c}  (expected False)")
+    print(f"  Pred (untrusted)    : class {np.argmax(logits_c)}")
     print("=" * 65)
 
 
