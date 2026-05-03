@@ -20,9 +20,13 @@ will be near 10% for both modes. The meaningful comparisons are:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import numpy as np
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from emvp_resnet import ResNet, softmax
 
@@ -45,7 +49,7 @@ def load_mnist(n: int | None = None) -> tuple[np.ndarray, np.ndarray]:
         import torchvision.transforms as transforms
 
         dataset = torchvision.datasets.MNIST(
-            root="./data", train=False, download=True,
+            root=os.path.join(_ROOT, "data"), train=False, download=True,
             transform=transforms.ToTensor(),
         )
         images, labels = [], []

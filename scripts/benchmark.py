@@ -2,8 +2,8 @@
 Benchmark: EMVP-Protected ResNet vs Plaintext on MNIST and CIFAR-10.
 
 Requires trained weights produced by train.py:
-  mnist_weights.npy   (python3 train.py --dataset mnist)
-  cifar10_weights.npy (python3 train.py --dataset cifar10)
+  weights/mnist_weights.npy   (python3 scripts/train.py --dataset mnist)
+  weights/cifar10_weights.npy (python3 scripts/train.py --dataset cifar10)
 
 Metrics reported per dataset
 -----------------------------
@@ -16,15 +16,18 @@ Metrics reported per dataset
 
 Usage
 -----
-  python3 benchmark.py                  # both datasets, default image counts
-  python3 benchmark.py --dataset mnist  # MNIST only
-  python3 benchmark.py --n-plain 500 --n-emvp 100
+  python3 scripts/benchmark.py                  # both datasets, default counts
+  python3 scripts/benchmark.py --dataset mnist  # MNIST only
+  python3 scripts/benchmark.py --n-plain 500 --n-emvp 100
 """
 
 from __future__ import annotations
 
 import argparse, os, sys, time
 import numpy as np
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from emvp_resnet import ResNet, softmax
 
@@ -52,7 +55,7 @@ def _norm_cifar(img: np.ndarray) -> np.ndarray:
 def _load_torchvision(dataset: str, n: int):
     import torchvision, torchvision.transforms as T
     cls  = torchvision.datasets.MNIST if dataset == "mnist" else torchvision.datasets.CIFAR10
-    dset = cls("./data", train=False, download=True, transform=T.ToTensor())
+    dset = cls(os.path.join(_ROOT, "data"), train=False, download=True, transform=T.ToTensor())
     imgs, labs = [], []
     for img, label in dset:
         imgs.append(img.numpy())
@@ -94,12 +97,12 @@ _CONFIG = {
     "mnist": dict(
         C_in=1, n_blocks=2, num_classes=10,
         normalize=_norm_mnist,
-        weight_file="mnist_weights.npy",
+        weight_file=os.path.join(_ROOT, "weights", "mnist_weights.npy"),
     ),
     "cifar10": dict(
         C_in=3, n_blocks=2, num_classes=10,
         normalize=_norm_cifar,
-        weight_file="cifar10_weights.npy",
+        weight_file=os.path.join(_ROOT, "weights", "cifar10_weights.npy"),
     ),
 }
 
@@ -132,7 +135,7 @@ def run_dataset(
         print(f"  Loaded weights from {wfile}")
     else:
         print(f"  WARNING: {wfile} not found — using random weights (accuracy ~10%)")
-        print(f"           Run: python3 train.py --dataset {dataset}")
+        print(f"           Run: python3 scripts/train.py --dataset {dataset}")
 
     # Build model
     model = ResNet(

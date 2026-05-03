@@ -174,7 +174,7 @@ over the sequential baseline.
 Benchmarks were run on 1000 test images per dataset on an Apple M1 Max
 (CPU, C extension backend).
 
-![Benchmark results](benchmark_results.png)
+![Benchmark results](results/benchmark_results.png)
 
 | Metric | MNIST | CIFAR-10 |
 |---|---|---|
@@ -219,34 +219,56 @@ query.
 
 ---
 
-## Files
+## Layout
 
-| File | Purpose |
-|---|---|
-| `emvp_resnet.py` | Core library: field arithmetic, EMVP protocol, ResNet model |
-| `emvp_core.c` | C extension for fast F_p arithmetic (compile before use) |
-| `train.py` | Train the ResNet on MNIST / CIFAR-10 and save BN-folded weights |
-| `benchmark.py` | Benchmark: plaintext vs EMVP accuracy and speed |
-| `plot_benchmark.py` | Generate `benchmark_results.png` from benchmark numbers |
-| `benchmark_results.md` | Benchmark results in table form |
-| `benchmark_results.png` | Benchmark results figure |
-| `mnist_weights.npy` | Pretrained weights (99.7% MNIST test accuracy) |
-| `cifar10_weights.npy` | Pretrained weights (90.2% CIFAR-10 test accuracy) |
+```
+EMVPProject/
+├── README.md
+├── CLAUDE.md
+├── src/                          # core library
+│   ├── emvp_resnet.py            # field arithmetic, EMVP protocol, ResNet
+│   ├── emvp_core.c               # C extension for fast F_p arithmetic
+│   └── emvp_core.so              # compiled extension (built by you)
+├── scripts/                      # CLI entry points
+│   ├── train.py                  # train ResNet on MNIST / CIFAR-10
+│   ├── benchmark.py              # plaintext vs EMVP accuracy + speed
+│   ├── benchmark_mnist.py        # MNIST-only timing on random weights
+│   ├── benchmark_checksum.py     # EMVP with vs without Freivalds checksum
+│   ├── plot_benchmark.py         # render results/benchmark_results.png
+│   └── timing_audit.py           # side-channel timing audit
+├── weights/                      # pretrained checkpoints
+│   ├── mnist_weights.npy         # 99.7% MNIST test accuracy
+│   └── cifar10_weights.npy       # 90.2% CIFAR-10 test accuracy
+├── results/                      # captured runs and plots
+│   ├── benchmark_results.md
+│   ├── benchmark_results.png
+│   └── benchmark_checksum_results.txt
+├── docs/                         # design docs
+│   ├── batch-GPU.md
+│   ├── VERIFY_PLAN.md            # plan for the checksum-verification work
+│   └── VERIFY_ACTIONS.md         # results of the checksum-verification work
+└── data/                         # dataset cache, downloaded on demand
+```
 
 ---
 
 ## Quick Start
 
+Run all commands from the project root.
+
 ```bash
-# 1. Compile the C extension
-cc -O3 -march=native -shared -fPIC -o emvp_core.so emvp_core.c
+# 1. Compile the C extension (output sits next to emvp_resnet.py)
+cc -O3 -march=native -shared -fPIC -o src/emvp_core.so src/emvp_core.c
 
-# 2. Run the benchmark (uses pretrained weights)
-python3 benchmark.py
+# 2. Run the benchmark (uses pretrained weights/*.npy)
+python3 scripts/benchmark.py
 
-# 3. Retrain from scratch (optional; requires PyTorch)
-python3 train.py --dataset mnist
-python3 train.py --dataset cifar10
+# 3. Verify the checksum extension (with vs without Freivalds check)
+python3 scripts/benchmark_checksum.py
+
+# 4. Retrain from scratch (optional; requires PyTorch)
+python3 scripts/train.py --dataset mnist
+python3 scripts/train.py --dataset cifar10
 ```
 
 ---
@@ -255,12 +277,12 @@ python3 train.py --dataset cifar10
 
 ```
 numpy >= 1.24
-torch >= 2.0       # training only (train.py)
+torch >= 2.0       # training only (scripts/train.py)
 torchvision        # training and data loading only
-matplotlib         # plotting only (plot_benchmark.py)
+matplotlib         # plotting only (scripts/plot_benchmark.py)
 ```
 
-The core EMVP protocol and ResNet inference (`emvp_resnet.py`) require only
+The core EMVP protocol and ResNet inference (`src/emvp_resnet.py`) require only
 NumPy. PyTorch is needed only for training.
 
 ---
